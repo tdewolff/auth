@@ -2,107 +2,139 @@ package auth
 
 import (
 	"encoding/json"
-	"io"
+	"net/http"
 
 	"golang.org/x/oauth2"
-	"golang.org/x/oauth2/facebook"
-	"golang.org/x/oauth2/github"
-	"golang.org/x/oauth2/google"
 )
 
-type providerUserFunc func(io.Reader) (*User, error)
+type ProviderFunc func(string, string, string, []string) *Provider
 
-func defaultUserFunc(r io.Reader) (*User, error) {
-	v := struct {
-		Name string `json:"name"`
-	}{}
-	if err := json.NewDecoder(r).Decode(&v); err != nil {
-		return nil, err
-	}
-	return NewUser(v.Name, "email"), nil
+var Providers = map[string]ProviderFunc{
+	"google":   Google,
+	"facebook": Facebook,
+	"github":   GitHub,
 }
 
-var providers = map[string]struct {
-	name     string
-	endpoint oauth2.Endpoint
-	scopes   []string
-	userURL  string
-	userFunc providerUserFunc
-}{
-	"google": {
-		"Google",
-		google.Endpoint,
-		[]string{"https://www.googleapis.com/auth/userinfo.email"},
-		"https://www.googleapis.com/oauth2/v3/userinfo",
-		defaultUserFunc,
-	},
-	"facebook": {
-		"Facebook",
-		facebook.Endpoint,
-		[]string{"public_profile"},
-		"https://graph.facebook.com/me",
-		defaultUserFunc,
-	},
-	"github": {
-		"GitHub",
-		github.Endpoint,
-		[]string{"user"},
-		"https://api.github.com/user",
-		defaultUserFunc,
-	},
+type UserFunc func(*http.Client) (*User, error)
+
+type Provider struct {
+	Name string
+	*oauth2.Config
+	User UserFunc
 }
 
 ////////////////
 
-type Provider struct {
-	id       string
-	name     string
-	userURL  string
-	userFunc providerUserFunc
-	config   *oauth2.Config
-}
-
-func newProvider(id, clientID, clientSecret, redirectURL string) *Provider {
-	provider, ok := providers[id]
-	if !ok {
-		return nil
-	}
+func Google(clientID, clientSecret, redirectURL string, scopes []string) *Provider {
 	return &Provider{
-		id,
-		provider.name,
-		provider.userURL,
-		provider.userFunc,
+		"Google",
 		&oauth2.Config{
 			ClientID:     clientID,
 			ClientSecret: clientSecret,
 			RedirectURL:  redirectURL,
-			Endpoint:     provider.endpoint,
-			Scopes:       provider.scopes,
+			Endpoint: oauth2.Endpoint{
+				AuthURL:  "https://accounts.google.com/o/oauth2/auth",
+				TokenURL: "https://accounts.google.com/o/oauth2/token",
+			},
+			Scopes: mergeScopes(scopes, []string{"profile", "email", "openid"}),
+		},
+		func(client *http.Client) (*User, error) {
+			resp, err := client.Get("https://www.googleapis.com/oauth2/v2/userinfo")
+			if err != nil {
+				return nil, err
+			}
+			defer resp.Body.Close()
+
+			v := struct {
+				Email string `json:"email"`
+				Name  string `json:"name"`
+			}{}
+
+			if err := json.NewDecoder(resp.Body).Decode(&v); err != nil {
+				return nil, err
+			}
+			return NewUser(v.Name, v.Email), nil
 		},
 	}
 }
 
-func (p *Provider) ID() string {
-	return p.id
+func Facebook(clientID, clientSecret, redirectURL string, scopes []string) *Provider {
+	return &Provider{
+		"Facebook",
+		&oauth2.Config{
+			ClientID:     clientID,
+			ClientSecret: clientSecret,
+			RedirectURL:  redirectURL,
+			Endpoint: oauth2.Endpoint{
+				AuthURL:  "https://www.facebook.com/dialog/oauth",
+				TokenURL: "https://graph.facebook.com/oauth/access_token",
+			},
+			Scopes: mergeScopes(scopes, []string{"email"}),
+		},
+		func(client *http.Client) (*User, error) {
+			resp, err := client.Get("https://graph.facebook.com/me?fields=name,email")
+			if err != nil {
+				return nil, err
+			}
+			defer resp.Body.Close()
+
+			v := struct {
+				Email string `json:"email"`
+				Name  string `json:"name"`
+			}{}
+
+			if err := json.NewDecoder(resp.Body).Decode(&v); err != nil {
+				return nil, err
+			}
+			return NewUser(v.Name, v.Email), nil
+		},
+	}
 }
 
-func (p *Provider) Name() string {
-	return p.name
+func GitHub(clientID, clientSecret, redirectURL string, scopes []string) *Provider {
+	return &Provider{
+		"GitHub",
+		&oauth2.Config{
+			ClientID:     clientID,
+			ClientSecret: clientSecret,
+			RedirectURL:  redirectURL,
+			Endpoint: oauth2.Endpoint{
+				AuthURL:  "https://github.com/login/oauth/authorize",
+				TokenURL: "https://github.com/login/oauth/access_token",
+			},
+			Scopes: mergeScopes(scopes, []string{"user"}),
+		},
+		func(client *http.Client) (*User, error) {
+			resp, err := client.Get("https://api.github.com/user")
+			if err != nil {
+				return nil, err
+			}
+			defer resp.Body.Close()
+
+			v := struct {
+				Email string `json:"email"`
+				Name  string `json:"name"`
+			}{}
+
+			if err := json.NewDecoder(resp.Body).Decode(&v); err != nil {
+				return nil, err
+			}
+			return NewUser(v.Name, v.Email), nil
+		},
+	}
 }
 
-func (p *Provider) User(code string) (*User, string, string, error) {
-	oauthToken, err := p.config.Exchange(oauth2.NoContext, code)
-	if err != nil {
-		return nil, "", "", err
-	}
+////////////////
 
-	client := p.config.Client(oauth2.NoContext, oauthToken)
-	resp, err := client.Get(p.userURL)
-	if err != nil {
-		return nil, "", "", err
+func mergeScopes(dst, src []string) []string {
+srcLoop:
+	for _, srcScope := range src {
+		for _, dstScope := range dst {
+			if srcScope == dstScope {
+				continue srcLoop
+			}
+		}
+		dst = append(dst, srcScope)
 	}
-	defer resp.Body.Close()
-
-	user, err := p.userFunc(resp.Body)
-	return user, oauthToken.AccessToken, oauthToken.RefreshToken, err
+	return dst
 }

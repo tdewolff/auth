@@ -13,34 +13,8 @@ import (
 
 	"github.com/dgrijalva/jwt-go"
 	"github.com/gorilla/context"
+	"golang.org/x/oauth2"
 )
-
-type User struct {
-	ID    int64  `json:"id"`
-	Name  string `json:"name"`
-	Email string `json:"email"`
-	New   bool   `json:"new"`
-}
-
-func NewUser(name, email string) *User {
-	return &User{
-		0,
-		name,
-		email,
-		false,
-	}
-}
-
-type UserClaims struct {
-	User
-	jwt.StandardClaims
-}
-
-// UserStore handles user logins with the database
-type UserStore interface {
-	Login(*User, string, string, string) (bool, error)
-	Validate(*User) (bool, error)
-}
 
 type Auth struct {
 	issuer        string
@@ -74,13 +48,17 @@ func (a *Auth) SetCORS(clientURL string) {
 	a.corsURL = clientURL
 }
 
-func (a *Auth) AddProvider(id, clientID, clientSecret, redirectURL string) {
-	provider := newProvider(id, clientID, clientSecret, redirectURL)
-	if provider == nil {
+func (a *Auth) AddProvider(id, clientID, clientSecret, redirectURL string, scopes []string) {
+	providerFunc, ok := Providers[id]
+	if !ok {
 		log.Println("provider doesn't exist:", id)
 		return
 	}
-	a.providers[id] = provider
+	a.providers[id] = providerFunc(clientID, clientSecret, redirectURL, scopes)
+}
+
+func (a *Auth) GetProvider(id string) *Provider {
+	return a.providers[id]
 }
 
 type ProviderList struct {
@@ -95,7 +73,7 @@ type ProviderItem struct {
 	URL  string `json:"url`
 }
 
-func (a *Auth) AuthList(w http.ResponseWriter, r *http.Request) {
+func (a *Auth) Auth(w http.ResponseWriter, r *http.Request) {
 	if a.corsURL != "" {
 		w.Header().Set("Access-Control-Allow-Origin", a.corsURL)
 		w.Header().Set("Access-Control-Allow-Methods", "GET")
@@ -128,12 +106,12 @@ func (a *Auth) AuthList(w http.ResponseWriter, r *http.Request) {
 
 	// Generate states for every provider, save them to the session store and generate an authorization URL
 	list := ProviderList{encodedSessionID, make([]ProviderItem, 0, len(a.providers))}
-	for _, provider := range a.providers {
-		state := encodeState(csrf, provider.ID(), refererURI)
+	for id, provider := range a.providers {
+		state := encodeState(csrf, id, refererURI)
 		item := ProviderItem{
-			provider.ID(),
-			provider.Name(),
-			provider.config.AuthCodeURL(state),
+			id,
+			provider.Name,
+			provider.Config.AuthCodeURL(state),
 		}
 		list.Providers = append(list.Providers, item)
 	}
@@ -198,26 +176,31 @@ func (a *Auth) Token(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get user data from the provider
-	user, accessToken, refreshToken, err := provider.User(code)
+	// Get OAuth token and encode to JSON for database storage
+	oauthToken, err := provider.Config.Exchange(oauth2.NoContext, code)
 	if err != nil {
-		log.Printf("OAuth request to %v failed: %v\n", provider.Name(), err)
+		log.Printf("OAuth exchange to %v failed: %v\n", providerID, err)
+		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+		return
+	}
+
+	// Get user data from the provider
+	client := provider.Config.Client(oauth2.NoContext, oauthToken)
+	user, err := provider.User(client)
+	if err != nil {
+		log.Printf("OAuth request to %v failed: %v\n", providerID, err)
 		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
 		return
 	}
 
 	// Login the user
-	if ok, err := a.userStore.Login(user, providerID, accessToken, refreshToken); err != nil {
-		log.Println("user login failed:", err)
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-		return
-	} else if !ok {
+	if !a.userStore.Login(user, providerID, oauthToken) {
 		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
 		return
 	}
 
 	// Generate JWT and send it back to the client
-	tokenString, err := a.generateJWT(user)
+	jwtString, err := a.generateJWT(user)
 	if err != nil {
 		log.Println("jwt signing failed:", err)
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
@@ -228,7 +211,7 @@ func (a *Auth) Token(w http.ResponseWriter, r *http.Request) {
 		JWT     string `json:"jwt"`
 		Referer string `json:"referer"`
 	}{
-		tokenString,
+		jwtString,
 		refererURI,
 	}
 
@@ -285,11 +268,7 @@ func (a *Auth) Middleware(next http.Handler) http.Handler {
 		}
 
 		// Validate the user with the database
-		if ok, err := a.userStore.Validate(&claims.User); err != nil {
-			log.Println("could not validate user:", err)
-			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-			return
-		} else if !ok {
+		if !a.userStore.Validate(&claims.User) {
 			http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 			return
 		}
