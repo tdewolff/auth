@@ -1,51 +1,47 @@
 package auth
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/gob"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"net/url"
-	"strings"
+	"sort"
 	"time"
 
-	"github.com/dgrijalva/jwt-go"
-	"github.com/gorilla/context"
+	"github.com/gorilla/sessions"
 	"golang.org/x/oauth2"
 )
 
-type Auth struct {
-	issuer        string
-	userStore     UserStore
-	jwtSecret     []byte
-	jwtExpiration time.Duration
+var sessionDuration = time.Minute * 10
 
-	providers    map[string]*Provider
-	sessionStore *SessionStore
-
-	corsURL string
+func init() {
+	gob.Register(User{})
 }
 
-func New(issuer string, userStore UserStore, jwtSecret []byte, jwtExpiration time.Duration) *Auth {
+type Auth struct {
+	sessionStore sessions.Store
+	userStore    UserStore
+
+	devURL    string
+	providers map[string]*Provider
+}
+
+func New(sessionStore sessions.Store, userStore UserStore) *Auth {
 	return &Auth{
-		issuer,
+		sessionStore,
 		userStore,
-		jwtSecret,
-		jwtExpiration,
-		map[string]*Provider{},
-		StartSessions(),
 		"",
+		map[string]*Provider{},
 	}
 }
 
-func (a *Auth) Close() {
-	a.sessionStore.Stop()
-}
-
-func (a *Auth) SetCORS(clientURL string) {
-	a.corsURL = clientURL
+func (a *Auth) SetDevURL(devURL string) {
+	a.devURL = devURL
 }
 
 func (a *Auth) AddProvider(id, clientID, clientSecret, redirectURL string, scopes []string) {
@@ -57,13 +53,16 @@ func (a *Auth) AddProvider(id, clientID, clientSecret, redirectURL string, scope
 	a.providers[id] = providerFunc(clientID, clientSecret, redirectURL, scopes)
 }
 
-func (a *Auth) GetProvider(id string) *Provider {
-	return a.providers[id]
-}
+type ProviderList []ProviderItem
 
-type ProviderList struct {
-	SessionID string         `json:"sessionId"`
-	Providers []ProviderItem `json:"providers"`
+func (s ProviderList) Len() int {
+	return len(s)
+}
+func (s ProviderList) Swap(i, j int) {
+	s[i], s[j] = s[j], s[i]
+}
+func (s ProviderList) Less(i, j int) bool {
+	return s[i].Name < s[j].Name
 }
 
 // ProviderItem is the response for the List request
@@ -74,10 +73,11 @@ type ProviderItem struct {
 }
 
 func (a *Auth) Auth(w http.ResponseWriter, r *http.Request) {
-	if a.corsURL != "" {
-		w.Header().Set("Access-Control-Allow-Origin", a.corsURL)
+	if a.devURL != "" {
+		w.Header().Set("Access-Control-Allow-Origin", a.devURL)
 		w.Header().Set("Access-Control-Allow-Methods", "GET")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type,Authorization")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
 	}
 
 	if r.Method == "OPTIONS" {
@@ -85,41 +85,38 @@ func (a *Auth) Auth(w http.ResponseWriter, r *http.Request) {
 	} else if r.Method != "GET" {
 		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
 		return
-	} else if r.Header.Get("Authorization") != "" {
-		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
-		return
 	}
 	r.ParseForm()
 
 	// Generate Cross-Site Request Forgery token and set session
 	csrf := base64.URLEncoding.EncodeToString(GenerateSecret(32))
-	refererURI := r.Form.Get("referer")
-	encodedSessionID, ok := a.sessionStore.Add(Session{
-		csrf,
-		refererURI,
-		time.Now().Add(sessionDuration),
-	})
-	if !ok {
-		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+	referrer := r.Form.Get("referrer")
+
+	session, _ := a.sessionStore.New(r, "auth")
+	session.Options.MaxAge = int(sessionDuration.Seconds())
+	// session.Options.Secure = true // TODO: use HTTPS
+	session.Options.HttpOnly = true
+	session.Values["csrf"] = csrf
+	session.Values["referrer"] = referrer
+	if err := session.Save(r, w); err != nil {
+		log.Println("could not save session:", err)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
 
 	// Generate states for every provider, save them to the session store and generate an authorization URL
-	list := ProviderList{encodedSessionID, make([]ProviderItem, 0, len(a.providers))}
+	providers := ProviderList(make([]ProviderItem, 0, len(a.providers)))
 	for id, provider := range a.providers {
-		state := encodeState(csrf, id, refererURI)
-		item := ProviderItem{
-			id,
-			provider.Name,
-			provider.Config.AuthCodeURL(state),
-		}
-		list.Providers = append(list.Providers, item)
+		state := encodeState(csrf, referrer, id)
+		authURL := provider.Config.AuthCodeURL(state)
+		providers = append(providers, ProviderItem{id, provider.Name, authURL})
 	}
+	sort.Sort(providers)
 
 	// Send JSON response
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	if err := json.NewEncoder(w).Encode(list); err != nil {
+	if err := json.NewEncoder(w).Encode(providers); err != nil {
 		log.Println("could not encode response:", err)
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
@@ -127,10 +124,11 @@ func (a *Auth) Auth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *Auth) Token(w http.ResponseWriter, r *http.Request) {
-	if a.corsURL != "" {
-		w.Header().Set("Access-Control-Allow-Origin", a.corsURL)
+	if a.devURL != "" {
+		w.Header().Set("Access-Control-Allow-Origin", a.devURL)
 		w.Header().Set("Access-Control-Allow-Methods", "GET")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type,Authorization")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
 	}
 
 	if r.Method == "OPTIONS" {
@@ -138,16 +136,12 @@ func (a *Auth) Token(w http.ResponseWriter, r *http.Request) {
 	} else if r.Method != "GET" {
 		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
 		return
-	} else if r.Header.Get("Authorization") != "" {
-		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
-		return
 	}
 	r.ParseForm()
 
 	// Get code and state parameters, and unpack state
 	code := r.Form.Get("code")
-	sessionID := r.Form.Get("session_id")
-	csrf, providerID, refererURI, err := decodeState(r.Form.Get("state"))
+	csrf, referrer, providerID, err := decodeState(r.Form.Get("state"))
 	if err != nil {
 		log.Println("decoding state failed:", err)
 		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
@@ -155,18 +149,23 @@ func (a *Auth) Token(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get session
-	session, ok := a.sessionStore.Get(sessionID)
-	if !ok {
+	session, err := a.sessionStore.New(r, "auth")
+	if err != nil {
 		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
 		return
 	}
-
-	// Check that state equals previously generated state, to ensure that the client requested access through this server
-	if csrf != session.csrf || refererURI != session.refererURI {
-		log.Printf("bad state: csrf %s != %s or refererURI %s != %s\n", csrf, session.csrf, refererURI, session.refererURI)
+	if sessionCSRF, ok := session.Values["csrf"].(string); !ok || csrf != sessionCSRF {
+		log.Printf("bad CSRF: %s != %s\n", csrf, sessionCSRF)
 		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
 		return
 	}
+	if sessionReferrer, ok := session.Values["referrer"].(string); !ok || referrer != sessionReferrer {
+		log.Printf("bad referrer: %s != %s\n", referrer, sessionReferrer)
+		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+		return
+	}
+	delete(session.Values, "csrf")
+	delete(session.Values, "referrer")
 
 	// Get provider
 	provider, ok := a.providers[providerID]
@@ -193,26 +192,29 @@ func (a *Auth) Token(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Login the user
-	if !a.userStore.Login(user, providerID, oauthToken) {
+	// Login the user and set OAuth token
+	if !a.userStore.Login(user) {
+		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+		return
+	}
+	if err := a.userStore.SetToken(user, providerID, oauthToken); err != nil {
 		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
 		return
 	}
 
-	// Generate JWT and send it back to the client
-	jwtString, err := a.generateJWT(user)
-	if err != nil {
-		log.Println("jwt signing failed:", err)
+	session.Values["user"] = *user
+	if err := session.Save(r, w); err != nil {
+		log.Println("could not save session:", err)
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
 
 	v := struct {
-		JWT     string `json:"jwt"`
-		Referer string `json:"referer"`
+		User     *User  `json:"user"`
+		Referrer string `json:"referrer"`
 	}{
-		jwtString,
-		refererURI,
+		user,
+		referrer,
 	}
 
 	// Send JSON response
@@ -225,12 +227,85 @@ func (a *Auth) Token(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (a *Auth) Logout(w http.ResponseWriter, r *http.Request) {
+	if a.devURL != "" {
+		w.Header().Set("Access-Control-Allow-Origin", a.devURL)
+		w.Header().Set("Access-Control-Allow-Methods", "GET")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
+	}
+
+	if r.Method == "OPTIONS" {
+		return
+	} else if r.Method != "GET" {
+		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
+		return
+	}
+
+	session, err := a.sessionStore.New(r, "auth")
+	if err != nil {
+		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+		return
+	}
+	session.Options.MaxAge = -1
+	if err := session.Save(r, w); err != nil {
+		log.Println("could not save session:", err)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+}
+
+func (a *Auth) Validate(w http.ResponseWriter, r *http.Request) (*User, error) {
+	session, err := a.sessionStore.New(r, "auth")
+	if err != nil {
+		return nil, err
+	}
+
+	user, ok := session.Values["user"].(User)
+	if !ok {
+		fmt.Println(session.Values["user"], user, ok)
+		return nil, fmt.Errorf("no user in session")
+	}
+
+	// Validate the user with the database
+	if !a.userStore.Validate(&user) {
+		return nil, fmt.Errorf("invalid user")
+	}
+
+	// Renew JWT if more than half the JWT expiration time has expired
+	// if time.Unix(claims.ExpiresAt, 0).Sub(time.Now()) < a.jwtExpiration/2 {
+	// 	if tokenString, err := a.generateJWT(&claims.User); err != nil {
+	// 		log.Println("could not refresh JWT:", err)
+	// 	} else {
+	// 		w.Header().Set("Set-Authorization", tokenString)
+	// 	}
+	// }
+	return &user, nil
+}
+
+func (a *Auth) Clients(user *User) (map[string]*http.Client, error) {
+	tokens, err := a.userStore.GetTokens(user)
+	if err != nil {
+		return nil, err
+	}
+
+	clients := map[string]*http.Client{}
+	for providerID, token := range tokens {
+		provider := a.providers[providerID]
+		if provider == nil {
+			continue
+		}
+		clients[providerID] = provider.Config.Client(oauth2.NoContext, token)
+	}
+	return clients, nil
+}
+
 // Middleware provides authentication middleware for a http.HandlerFunc
 func (a *Auth) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if a.corsURL != "" {
-			w.Header().Set("Access-Control-Allow-Origin", a.corsURL) // prevent CORS error when unauthorized or internal server error
-			w.Header().Set("Access-Control-Expose-Headers", "Set-Authorization")
+		if a.devURL != "" {
+			w.Header().Set("Access-Control-Allow-Origin", a.devURL) // prevent CORS error when unauthorized or internal server error
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
 		}
 
 		if r.Method == "OPTIONS" {
@@ -238,55 +313,45 @@ func (a *Auth) Middleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Retrieve authorization token from header
-		var tokenString string
-		tokenStrings, ok := r.Header["Authorization"]
-		if ok && len(tokenStrings) >= 1 {
-			tokenString = strings.TrimPrefix(tokenStrings[0], "Bearer ")
-		}
-		if tokenString == "" {
-			http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
-			return
-		}
+		fmt.Println(r.Header.Get("Origin"))
+		fmt.Println(r.Header.Get("Referrer"))
+		fmt.Println(r.Header.Get("X-Requested-By"))
 
-		// Parse JWT and extract claims
-		token, err := jwt.ParseWithClaims(tokenString, &UserClaims{}, func(token *jwt.Token) (interface{}, error) {
-			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
-			}
-			return a.jwtSecret, nil
-		})
+		// TODO: CSRF protection
+
+		user, err := a.Validate(w, r)
 		if err != nil {
-			http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
-			return
-		}
-
-		claims, ok := token.Claims.(*UserClaims)
-		if !ok || !token.Valid {
-			http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
-			return
-		}
-
-		// Validate the user with the database
-		if !a.userStore.Validate(&claims.User) {
+			fmt.Println(err)
 			http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 			return
 		}
 
-		// Renew JWT if more than half the JWT expiration time has expired
-		if time.Unix(claims.ExpiresAt, 0).Sub(time.Now()) < a.jwtExpiration/2 {
-			if tokenString, err := a.generateJWT(&claims.User); err != nil {
-				log.Println("could not refresh JWT:", err)
-			} else {
-				w.Header().Set("Set-Authorization", tokenString)
-			}
+		clients, err := a.Clients(user)
+		if err != nil {
+			fmt.Println(err)
+			http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
+			return
 		}
 
-		// Make user available to the API
-		context.Set(r, "user", &claims.User)
+		// Make user and tokens available to the API
+		ctx := r.Context()
+		ctx = context.WithValue(ctx, "user", user)
+		ctx = context.WithValue(ctx, "clients", clients)
 
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+func FromContext(ctx context.Context) (*User, map[string]*http.Client) {
+	user, ok := ctx.Value("user").(*User)
+	if !ok {
+		panic("context has no 'user'")
+	}
+	clients, ok := ctx.Value("clients").(map[string]*http.Client)
+	if !ok {
+		panic("context has no 'clients'")
+	}
+	return user, clients
 }
 
 // GenerateSecret returns a byte slice of length n of cryptographically secure random data
@@ -299,11 +364,11 @@ func GenerateSecret(n int) []byte {
 }
 
 // decodeState encodes our OAuth state string
-func encodeState(csrf, providerID, refererURI string) string {
+func encodeState(csrf, referrer, providerID string) string {
 	values := make(url.Values, 3)
-	values.Add("sec", csrf)
+	values.Add("csrf", csrf)
+	values.Add("ref", referrer)
 	values.Add("prv", providerID)
-	values.Add("uri", refererURI)
 	return base64.URLEncoding.EncodeToString([]byte(values.Encode()))
 }
 
@@ -317,18 +382,5 @@ func decodeState(state string) (string, string, string, error) {
 	if err != nil {
 		return "", "", "", err
 	}
-	return values.Get("sec"), values.Get("prv"), values.Get("uri"), nil
-}
-
-// generateJWT creates and signs JWT
-func (a *Auth) generateJWT(user *User) (string, error) {
-	claims := &UserClaims{
-		*user,
-		jwt.StandardClaims{
-			ExpiresAt: time.Now().Add(a.jwtExpiration).Unix(),
-			Issuer:    a.issuer,
-		},
-	}
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	return token.SignedString(a.jwtSecret)
+	return values.Get("csrf"), values.Get("ref"), values.Get("prv"), nil
 }
