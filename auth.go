@@ -313,9 +313,9 @@ func (a *Auth) Middleware(next http.Handler) http.Handler {
 			return
 		}
 
-		fmt.Println(r.Header.Get("Origin"))
-		fmt.Println(r.Header.Get("Referrer"))
-		fmt.Println(r.Header.Get("X-Requested-By"))
+		origin, err := url.Parse(r.Header.Get("Origin"))
+
+		fmt.Println(origin, err, r.URL)
 
 		// TODO: CSRF protection
 
