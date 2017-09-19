@@ -1,6 +1,6 @@
 {
   "name": "@tdewolff/auth",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "Auth is a package that provides OAuth endpoints for social logins and issues a JWT to be used for subsequent API calls.",
   "main": "auth.js",
   "scripts": {
