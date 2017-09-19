@@ -1,8 +1,8 @@
 const Auth = {
-  install (Vue, store, router) {
+  install: function (Vue, store, router) {
     Object.defineProperties(Vue.prototype, {
       $auth: {
-        get () {
+        get: function () {
           return Auth
         }
       }
@@ -18,7 +18,7 @@ const Auth = {
       Auth.store.dispatch('reload')
     }, false)
 
-    this.Vue.axios.interceptors.request.use((request) => {
+    this.Vue.axios.interceptors.request.use(function (request) {
       if (process.env.NODE_ENV === 'development') {
         console.log('Request Interceptor: ' + JSON.stringify(request))
       }
@@ -26,7 +26,7 @@ const Auth = {
       return request
     })
 
-    Vue.axios.interceptors.response.use((response) => {
+    Vue.axios.interceptors.response.use(function (response) {
       if (process.env.NODE_ENV === 'development') {
         console.log('Response Interceptor: ' + JSON.stringify(response))
       }
@@ -40,14 +40,14 @@ const Auth = {
     })
   },
   getAuthURLs: function (referrer) {
-    return new Promise((resolve, reject) => {
+    return new Promise(function (resolve, reject) {
       if (!Auth.isLoggedIn()) {
         Auth.Vue.axios.get('http://localhost:3000/auth/list?referrer=' + encodeURIComponent(referrer))
-        .then(response => {
+        .then(function (response) {
           resolve(response.data)
         })
-        .catch(e => {
-          reject(e)
+        .catch(function (error) {
+          reject(error)
         })
       } else {
         reject('already logged in')
@@ -63,14 +63,14 @@ const Auth = {
     }
   },
   login: function (state, code) {
-    return new Promise((resolve, reject) => {
+    return new Promise(function (resolve, reject) {
       Auth.Vue.axios.get('http://localhost:3000/auth/token?state=' + encodeURIComponent(state) + '&code=' + encodeURIComponent(code))
-      .then(response => {
+      .then(function (response) {
         Auth.store.dispatch('login', JSON.stringify(response.data.user))
         resolve(response.data.referrer)
       })
-      .catch(e => {
-        reject(e)
+      .catch(function (error) {
+        reject(error)
       })
     })
   },
@@ -85,31 +85,31 @@ const AuthStore = {
     user: localStorage.getItem('user')
   },
   mutations: {
-    LOGIN: (state, user) => {
+    LOGIN: function (state, user) => {
       state.user = user
     },
-    LOGOUT: (state) => {
+    LOGOUT: function (state) => {
       state.user = null
     }
   },
   actions: {
-    reload ({commit, state}) {
+    reload: function ({commit, state}) {
       var user = localStorage.getItem('user')
       if (user !== state.user) {
         commit('LOGIN', user)
       }
     },
-    login ({commit}, user) {
+    login: function ({commit}, user) {
       localStorage.setItem('user', user)
       commit('LOGIN', user)
     },
-    logout ({commit}) {
+    logout: function ({commit}) {
       localStorage.removeItem('user')
       commit('LOGOUT')
     }
   },
   getters: {
-    user: (state, getters) => {
+    user: function (state, getters) => {
       if (state.user) {
         try {
           return JSON.parse(state.user)
