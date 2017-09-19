@@ -93,19 +93,19 @@ const AuthStore = {
     }
   },
   actions: {
-    reload: function ({commit, state}) {
+    reload: function (context) {
       var user = localStorage.getItem('user')
-      if (user !== state.user) {
-        commit('LOGIN', user)
+      if (user !== context.state.user) {
+        context.commit('LOGIN', user)
       }
     },
-    login: function ({commit}, user) {
+    login: function (context, user) {
       localStorage.setItem('user', user)
-      commit('LOGIN', user)
+      context.commit('LOGIN', user)
     },
-    logout: function ({commit}) {
+    logout: function (context) {
       localStorage.removeItem('user')
-      commit('LOGOUT')
+      context.commit('LOGOUT')
     }
   },
   getters: {
