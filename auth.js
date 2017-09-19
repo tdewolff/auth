@@ -85,10 +85,10 @@ const AuthStore = {
     user: localStorage.getItem('user')
   },
   mutations: {
-    LOGIN: function (state, user) => {
+    LOGIN: function (state, user) {
       state.user = user
     },
-    LOGOUT: function (state) => {
+    LOGOUT: function (state) {
       state.user = null
     }
   },
@@ -109,7 +109,7 @@ const AuthStore = {
     }
   },
   getters: {
-    user: function (state, getters) => {
+    user: function (state, getters) {
       if (state.user) {
         try {
           return JSON.parse(state.user)
