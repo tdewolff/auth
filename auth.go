@@ -23,7 +23,7 @@ type Auth struct {
 	sessionStore sessions.Store
 	userStore    UserStore
 
-	devURL    string
+	cors      string
 	providers map[string]*Provider
 }
 
@@ -41,8 +41,8 @@ func New(userStore UserStore) *Auth {
 	}
 }
 
-func (a *Auth) SetDevURL(devURL string) {
-	a.devURL = devURL
+func (a *Auth) SetCORS(cors string) {
+	a.cors = cors
 }
 
 func (a *Auth) AddProvider(id, clientID, clientSecret, redirectURL string, scopes []string) {
@@ -74,8 +74,8 @@ type ProviderItem struct {
 }
 
 func (a *Auth) Auth(w http.ResponseWriter, r *http.Request) {
-	if a.devURL != "" {
-		w.Header().Set("Access-Control-Allow-Origin", a.devURL)
+	if a.cors != "" {
+		w.Header().Set("Access-Control-Allow-Origin", a.cors)
 		w.Header().Set("Access-Control-Allow-Methods", "GET")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 		w.Header().Set("Access-Control-Allow-Credentials", "true")
@@ -125,8 +125,8 @@ func (a *Auth) Auth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *Auth) Token(w http.ResponseWriter, r *http.Request) {
-	if a.devURL != "" {
-		w.Header().Set("Access-Control-Allow-Origin", a.devURL)
+	if a.cors != "" {
+		w.Header().Set("Access-Control-Allow-Origin", a.cors)
 		w.Header().Set("Access-Control-Allow-Methods", "GET")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 		w.Header().Set("Access-Control-Allow-Credentials", "true")
@@ -238,8 +238,8 @@ func (a *Auth) Token(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *Auth) Logout(w http.ResponseWriter, r *http.Request) {
-	if a.devURL != "" {
-		w.Header().Set("Access-Control-Allow-Origin", a.devURL)
+	if a.cors != "" {
+		w.Header().Set("Access-Control-Allow-Origin", a.cors)
 		w.Header().Set("Access-Control-Allow-Methods", "GET")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 		w.Header().Set("Access-Control-Allow-Credentials", "true")
@@ -317,8 +317,8 @@ func (a *Auth) Clients(userID int64) (map[string]*http.Client, error) {
 // Middleware provides authentication middleware for a http.HandlerFunc
 func (a *Auth) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if a.devURL != "" {
-			w.Header().Set("Access-Control-Allow-Origin", a.devURL) // prevent CORS error when unauthorized or internal server error
+		if a.cors != "" {
+			w.Header().Set("Access-Control-Allow-Origin", a.cors) // prevent CORS error when unauthorized or internal server error
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
 		}
 
