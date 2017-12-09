@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
-	"encoding/gob"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -13,15 +12,12 @@ import (
 	"sort"
 	"time"
 
+	"github.com/gorilla/securecookie"
 	"github.com/gorilla/sessions"
 	"golang.org/x/oauth2"
 )
 
 var sessionDuration = time.Minute * 10
-
-func init() {
-	gob.Register(User{})
-}
 
 type Auth struct {
 	sessionStore sessions.Store
@@ -31,7 +27,12 @@ type Auth struct {
 	providers map[string]*Provider
 }
 
-func New(sessionStore sessions.Store, userStore UserStore) *Auth {
+func New(userStore UserStore) *Auth {
+	sessionStore := sessions.NewCookieStore(
+		// []byte("secret"), // TODO: replace by random below
+		securecookie.GenerateRandomKey(64),
+		securecookie.GenerateRandomKey(32),
+	)
 	return &Auth{
 		sessionStore,
 		userStore,
@@ -67,9 +68,9 @@ func (s ProviderList) Less(i, j int) bool {
 
 // ProviderItem is the response for the List request
 type ProviderItem struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-	URL  string `json:"url`
+	ID   string
+	Name string
+	URL  string
 }
 
 func (a *Auth) Auth(w http.ResponseWriter, r *http.Request) {
@@ -193,16 +194,25 @@ func (a *Auth) Token(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Login the user and set OAuth token
-	if !a.userStore.Login(user) {
+	userID, ok := a.userStore.Get(user.Email)
+	if !ok {
+		// Register user
+		if userID, ok = a.userStore.Set(user); !ok {
+			http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+			return
+		}
+	}
+	oauthTokenBytes, err := json.Marshal(oauthToken)
+	if err != nil {
 		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
 		return
 	}
-	if err := a.userStore.SetToken(user, providerID, oauthToken); err != nil {
+	if err := a.userStore.SetToken(userID, providerID, string(oauthTokenBytes)); err != nil {
 		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
 		return
 	}
 
-	session.Values["user"] = *user
+	session.Values["user"] = user.Email
 	if err := session.Save(r, w); err != nil {
 		log.Println("could not save session:", err)
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
@@ -210,10 +220,10 @@ func (a *Auth) Token(w http.ResponseWriter, r *http.Request) {
 	}
 
 	v := struct {
-		User     *User  `json:"user"`
-		Referrer string `json:"referrer"`
+		User     string
+		Referrer string
 	}{
-		user,
+		user.Email,
 		referrer,
 	}
 
@@ -255,21 +265,21 @@ func (a *Auth) Logout(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (a *Auth) Validate(w http.ResponseWriter, r *http.Request) (*User, error) {
+func (a *Auth) Validate(w http.ResponseWriter, r *http.Request) (int64, string, error) {
 	session, err := a.sessionStore.New(r, "auth")
 	if err != nil {
-		return nil, err
+		return 0, "", err
 	}
 
-	user, ok := session.Values["user"].(User)
+	email, ok := session.Values["user"].(string)
 	if !ok {
-		fmt.Println(session.Values["user"], user, ok)
-		return nil, fmt.Errorf("no user in session")
+		return 0, "", fmt.Errorf("no user in session")
 	}
 
 	// Validate the user with the database
-	if !a.userStore.Validate(&user) {
-		return nil, fmt.Errorf("invalid user")
+	userID, ok := a.userStore.Get(email)
+	if !ok {
+		return 0, "", fmt.Errorf("invalid user")
 	}
 
 	// Renew JWT if more than half the JWT expiration time has expired
@@ -280,22 +290,26 @@ func (a *Auth) Validate(w http.ResponseWriter, r *http.Request) (*User, error) {
 	// 		w.Header().Set("Set-Authorization", tokenString)
 	// 	}
 	// }
-	return &user, nil
+	return userID, email, nil
 }
 
-func (a *Auth) Clients(user *User) (map[string]*http.Client, error) {
-	tokens, err := a.userStore.GetTokens(user)
+func (a *Auth) Clients(userID int64) (map[string]*http.Client, error) {
+	tokens, err := a.userStore.GetTokens(userID)
 	if err != nil {
 		return nil, err
 	}
 
 	clients := map[string]*http.Client{}
 	for providerID, token := range tokens {
+		var oauthToken *oauth2.Token
+		if err := json.Unmarshal([]byte(token), &oauthToken); err != nil {
+			return nil, err
+		}
 		provider := a.providers[providerID]
 		if provider == nil {
 			continue
 		}
-		clients[providerID] = provider.Config.Client(oauth2.NoContext, token)
+		clients[providerID] = provider.Config.Client(oauth2.NoContext, oauthToken)
 	}
 	return clients, nil
 }
@@ -319,14 +333,14 @@ func (a *Auth) Middleware(next http.Handler) http.Handler {
 
 		// TODO: CSRF protection
 
-		user, err := a.Validate(w, r)
+		userID, email, err := a.Validate(w, r)
 		if err != nil {
 			fmt.Println(err)
 			http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 			return
 		}
 
-		clients, err := a.Clients(user)
+		clients, err := a.Clients(userID)
 		if err != nil {
 			fmt.Println(err)
 			http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
@@ -335,15 +349,15 @@ func (a *Auth) Middleware(next http.Handler) http.Handler {
 
 		// Make user and tokens available to the API
 		ctx := r.Context()
-		ctx = context.WithValue(ctx, "user", user)
+		ctx = context.WithValue(ctx, "user", email)
 		ctx = context.WithValue(ctx, "clients", clients)
 
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
-func FromContext(ctx context.Context) (*User, map[string]*http.Client) {
-	user, ok := ctx.Value("user").(*User)
+func FromContext(ctx context.Context) (string, map[string]*http.Client) {
+	email, ok := ctx.Value("user").(string)
 	if !ok {
 		panic("context has no 'user'")
 	}
@@ -351,7 +365,7 @@ func FromContext(ctx context.Context) (*User, map[string]*http.Client) {
 	if !ok {
 		panic("context has no 'clients'")
 	}
-	return user, clients
+	return email, clients
 }
 
 // GenerateSecret returns a byte slice of length n of cryptographically secure random data

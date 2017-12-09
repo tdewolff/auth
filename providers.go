@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"golang.org/x/oauth2"
+	google "google.golang.org/api/oauth2/v2"
 )
 
 type ProviderFunc func(string, string, string, []string) *Provider
@@ -39,21 +40,22 @@ func Google(clientID, clientSecret, redirectURL string, scopes []string) *Provid
 			Scopes: mergeScopes(scopes, []string{"profile", "email", "openid"}),
 		},
 		func(client *http.Client) (*User, error) {
-			resp, err := client.Get("https://www.googleapis.com/oauth2/v2/userinfo")
+			service, err := google.New(client)
 			if err != nil {
 				return nil, err
 			}
-			defer resp.Body.Close()
 
-			v := struct {
-				Email string `json:"email"`
-				Name  string `json:"name"`
-			}{}
-
-			if err := json.NewDecoder(resp.Body).Decode(&v); err != nil {
+			userinfo, err := google.NewUserinfoService(service).Get().Do()
+			if err != nil {
 				return nil, err
 			}
-			return NewUser(v.Name, v.Email), nil
+
+			return &User{
+				Email:     userinfo.Email,
+				FirstName: userinfo.GivenName,
+				LastName:  userinfo.FamilyName,
+				Locale:    userinfo.Locale,
+			}, nil
 		},
 	}
 }
@@ -86,7 +88,10 @@ func Facebook(clientID, clientSecret, redirectURL string, scopes []string) *Prov
 			if err := json.NewDecoder(resp.Body).Decode(&v); err != nil {
 				return nil, err
 			}
-			return NewUser(v.Name, v.Email), nil
+			return &User{
+				Email:     v.Email,
+				FirstName: v.Name,
+			}, nil
 		},
 	}
 }
@@ -119,7 +124,10 @@ func GitHub(clientID, clientSecret, redirectURL string, scopes []string) *Provid
 			if err := json.NewDecoder(resp.Body).Decode(&v); err != nil {
 				return nil, err
 			}
-			return NewUser(v.Name, v.Email), nil
+			return &User{
+				Email:     v.Email,
+				FirstName: v.Name,
+			}, nil
 		},
 	}
 }
