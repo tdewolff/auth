@@ -9,6 +9,7 @@ type User struct {
 	FirstName string
 	LastName  string
 	Locale    string
+	Timezone  string
 }
 
 type UserClaims struct {

@@ -12,7 +12,6 @@ import (
 	"sort"
 	"time"
 
-	"github.com/gorilla/securecookie"
 	"github.com/gorilla/sessions"
 	"golang.org/x/oauth2"
 )
@@ -29,9 +28,9 @@ type Auth struct {
 
 func New(userStore UserStore) *Auth {
 	sessionStore := sessions.NewCookieStore(
-		// []byte("secret"), // TODO: replace by random below
-		securecookie.GenerateRandomKey(64),
-		securecookie.GenerateRandomKey(32),
+		[]byte("secret"), // TODO: replace by random below
+		// securecookie.GenerateRandomKey(64),
+		// securecookie.GenerateRandomKey(32),
 	)
 	return &Auth{
 		sessionStore,
@@ -192,6 +191,7 @@ func (a *Auth) Token(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
 		return
 	}
+	user.Timezone = r.Form.Get("timezone")
 
 	// Login the user and set OAuth token
 	userID, ok := a.userStore.Get(user.Email)
