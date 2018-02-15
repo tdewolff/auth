@@ -94,6 +94,7 @@ func (a *Auth) Auth(w http.ResponseWriter, r *http.Request) {
 
 	session, _ := a.sessionStore.New(r, "auth")
 	session.Options.MaxAge = int(sessionDuration.Seconds())
+	log.Println("Session MaxAge:", sessionDuration.Seconds())
 	// session.Options.Secure = true // TODO: use HTTPS
 	session.Options.HttpOnly = true
 	session.Values["csrf"] = csrf
@@ -237,6 +238,28 @@ func (a *Auth) Token(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (a *Auth) Check(w http.ResponseWriter, r *http.Request) {
+	if a.cors != "" {
+		w.Header().Set("Access-Control-Allow-Origin", a.cors)
+		w.Header().Set("Access-Control-Allow-Methods", "GET")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
+	}
+
+	if r.Method == "OPTIONS" {
+		return
+	} else if r.Method != "GET" {
+		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
+		return
+	}
+
+	_, _, err := a.Validate(w, r)
+	if err != nil {
+		http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
+		return
+	}
+}
+
 func (a *Auth) Logout(w http.ResponseWriter, r *http.Request) {
 	if a.cors != "" {
 		w.Header().Set("Access-Control-Allow-Origin", a.cors)
@@ -281,15 +304,6 @@ func (a *Auth) Validate(w http.ResponseWriter, r *http.Request) (int64, string, 
 	if !ok {
 		return 0, "", fmt.Errorf("invalid user")
 	}
-
-	// Renew JWT if more than half the JWT expiration time has expired
-	// if time.Unix(claims.ExpiresAt, 0).Sub(time.Now()) < a.jwtExpiration/2 {
-	// 	if tokenString, err := a.generateJWT(&claims.User); err != nil {
-	// 		log.Println("could not refresh JWT:", err)
-	// 	} else {
-	// 		w.Header().Set("Set-Authorization", tokenString)
-	// 	}
-	// }
 	return userID, email, nil
 }
 
