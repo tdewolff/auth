@@ -94,7 +94,7 @@ func (a *Auth) Auth(w http.ResponseWriter, r *http.Request) {
 
 	session, _ := a.sessionStore.New(r, "auth")
 	session.Options.MaxAge = int(sessionDuration.Seconds())
-	log.Println("Session MaxAge:", sessionDuration.Seconds())
+	log.Println("Session authenticate MaxAge:", sessionDuration.Seconds())
 	// session.Options.Secure = true // TODO: use HTTPS
 	session.Options.HttpOnly = true
 	session.Values["csrf"] = csrf
@@ -214,6 +214,7 @@ func (a *Auth) Token(w http.ResponseWriter, r *http.Request) {
 	}
 
 	session.Values["user"] = user.Email
+	log.Println("Session login MaxAge:", session.Options.MaxAge)
 	if err := session.Save(r, w); err != nil {
 		log.Println("could not save session:", err)
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
