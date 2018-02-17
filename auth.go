@@ -12,15 +12,19 @@ import (
 	"sort"
 	"time"
 
+	jwt "github.com/dgrijalva/jwt-go"
 	"github.com/gorilla/sessions"
 	"golang.org/x/oauth2"
 )
 
-// TODO: update session age on requests
-// TODO: pass XSRF token
-
 var authDuration = time.Minute * 10
-var loginDuration = time.Minute * 30
+var jwtDuration = time.Minute * 15
+var jwtSecret = []byte("secret")
+
+type jwtClaims struct {
+	UserID int64 `json:"uid"`
+	jwt.StandardClaims
+}
 
 type Auth struct {
 	sessionStore sessions.Store
@@ -80,7 +84,6 @@ func (a *Auth) Auth(w http.ResponseWriter, r *http.Request) {
 	if a.cors != "" {
 		w.Header().Set("Access-Control-Allow-Origin", a.cors)
 		w.Header().Set("Access-Control-Allow-Methods", "GET")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 		w.Header().Set("Access-Control-Allow-Credentials", "true")
 	}
 
@@ -131,8 +134,8 @@ func (a *Auth) Token(w http.ResponseWriter, r *http.Request) {
 	if a.cors != "" {
 		w.Header().Set("Access-Control-Allow-Origin", a.cors)
 		w.Header().Set("Access-Control-Allow-Methods", "GET")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 		w.Header().Set("Access-Control-Allow-Credentials", "true")
+		w.Header().Set("Access-Control-Expose-Headers", "Set-Authorization")
 	}
 
 	if r.Method == "OPTIONS" {
@@ -154,7 +157,6 @@ func (a *Auth) Token(w http.ResponseWriter, r *http.Request) {
 
 	// Get session
 	session, err := a.sessionStore.New(r, "auth")
-	fmt.Println("Session:", session.Options)
 	if err != nil {
 		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
 		return
@@ -169,8 +171,12 @@ func (a *Auth) Token(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
 		return
 	}
-	delete(session.Values, "csrf")
-	delete(session.Values, "referrer")
+	session.Options.MaxAge = -1
+	if err := session.Save(r, w); err != nil {
+		log.Println("could not save session:", err)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
 
 	// Get provider
 	provider, ok := a.providers[providerID]
@@ -217,113 +223,54 @@ func (a *Auth) Token(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session.Options.MaxAge = int(loginDuration.Seconds())
-	// session.Options.Secure = true // TODO: use HTTPS
-	session.Options.HttpOnly = true
-	session.Values["user"] = user.Email
-	if err := session.Save(r, w); err != nil {
-		log.Println("could not save session:", err)
+	// Generate JWT and send to client
+	tokenString, err := createJWT(userID)
+	if err != nil {
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
 
-	w.Header().Set("X-CSRF-Token", csrf.Token(r))
-
-	v := struct {
-		User     string
-		Referrer string
-	}{
-		user.Email,
-		referrer,
-	}
-
 	// Send JSON response
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Set-Authorization", tokenString)
 	w.WriteHeader(http.StatusOK)
-	if err := json.NewEncoder(w).Encode(v); err != nil {
+	if err := json.NewEncoder(w).Encode(referrer); err != nil {
 		log.Println("could not encode response:", err)
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
 }
 
-// TODO: remove
-func (a *Auth) Refresh(w http.ResponseWriter, r *http.Request) {
-	if a.cors != "" {
-		w.Header().Set("Access-Control-Allow-Origin", a.cors)
-		w.Header().Set("Access-Control-Allow-Methods", "GET")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-		w.Header().Set("Access-Control-Allow-Credentials", "true")
+func (a *Auth) Validate(w http.ResponseWriter, r *http.Request) (int64, error) {
+	tokenString := r.Header.Get("Authorization")
+	if tokenString == "" {
+		return 0, fmt.Errorf("no jwt token")
 	}
 
-	if r.Method == "OPTIONS" {
-		return
-	} else if r.Method != "GET" {
-		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
-		return
-	}
+	token, err := jwt.ParseWithClaims(tokenString, &jwtClaims{}, func(token *jwt.Token) (interface{}, error) {
+		if method, ok := token.Method.(*jwt.SigningMethodHMAC); !ok || method.Alg() != "HS256" {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
+		return jwtSecret, nil
+	})
 
-	_, email, err := a.Validate(w, r)
 	if err != nil {
-		http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
-		return
+		if ve, ok := err.(*jwt.ValidationError); ok {
+			if ve.Errors&jwt.ValidationErrorExpired != 0 {
+				return 0, fmt.Errorf("jwt expired")
+			}
+		}
+		return 0, fmt.Errorf("jwt: %v", err)
 	}
 
-	// Send JSON response
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	if err := json.NewEncoder(w).Encode(email); err != nil {
-		log.Println("could not encode response:", err)
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-		return
-	}
-}
-
-func (a *Auth) Logout(w http.ResponseWriter, r *http.Request) {
-	if a.cors != "" {
-		w.Header().Set("Access-Control-Allow-Origin", a.cors)
-		w.Header().Set("Access-Control-Allow-Methods", "GET")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-		w.Header().Set("Access-Control-Allow-Credentials", "true")
+	if token == nil || !token.Valid {
+		return 0, fmt.Errorf("jwt token invalid")
 	}
 
-	if r.Method == "OPTIONS" {
-		return
-	} else if r.Method != "GET" {
-		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
-		return
+	if claims, ok := token.Claims.(*jwtClaims); ok {
+		return claims.UserID, nil
 	}
-
-	session, err := a.sessionStore.New(r, "auth")
-	if err != nil {
-		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
-		return
-	}
-	session.Options.MaxAge = -1
-	if err := session.Save(r, w); err != nil {
-		log.Println("could not save session:", err)
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-		return
-	}
-}
-
-func (a *Auth) Validate(w http.ResponseWriter, r *http.Request) (int64, string, error) {
-	session, err := a.sessionStore.New(r, "auth")
-	if err != nil {
-		return 0, "", err
-	}
-
-	email, ok := session.Values["user"].(string)
-	if !ok {
-		return 0, "", fmt.Errorf("no user in session")
-	}
-
-	// Validate the user with the database
-	userID, ok := a.userStore.Get(email)
-	if !ok {
-		return 0, "", fmt.Errorf("invalid user")
-	}
-	return userID, email, nil
+	return 0, fmt.Errorf("jwt claims error")
 }
 
 func (a *Auth) Clients(userID int64) (map[string]*http.Client, error) {
@@ -352,7 +299,8 @@ func (a *Auth) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if a.cors != "" {
 			w.Header().Set("Access-Control-Allow-Origin", a.cors) // prevent CORS error when unauthorized or internal server error
-			w.Header().Set("Access-Control-Allow-Credentials", "true")
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization")
+			w.Header().Set("Access-Control-Expose-Headers", "Set-Authorization")
 		}
 
 		if r.Method == "OPTIONS" {
@@ -360,18 +308,21 @@ func (a *Auth) Middleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// origin, err := url.Parse(r.Header.Get("Origin"))
-
-		// fmt.Println(origin, err, r.URL)
-
-		// TODO: CSRF protection
-
-		userID, email, err := a.Validate(w, r)
+		userID, err := a.Validate(w, r)
 		if err != nil {
 			fmt.Println(err)
 			http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 			return
 		}
+
+		// Refresh JWT token every request for sliding session expiry
+		tokenString, err := createJWT(userID)
+		if err != nil {
+			fmt.Println(err)
+			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Set-Authorization", tokenString)
 
 		clients, err := a.Clients(userID)
 		if err != nil {
@@ -382,15 +333,15 @@ func (a *Auth) Middleware(next http.Handler) http.Handler {
 
 		// Make user and tokens available to the API
 		ctx := r.Context()
-		ctx = context.WithValue(ctx, "user", email)
+		ctx = context.WithValue(ctx, "user", userID)
 		ctx = context.WithValue(ctx, "clients", clients)
 
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
-func FromContext(ctx context.Context) (string, map[string]*http.Client) {
-	email, ok := ctx.Value("user").(string)
+func FromContext(ctx context.Context) (int64, map[string]*http.Client) {
+	userID, ok := ctx.Value("user").(int64)
 	if !ok {
 		panic("context has no 'user'")
 	}
@@ -398,7 +349,7 @@ func FromContext(ctx context.Context) (string, map[string]*http.Client) {
 	if !ok {
 		panic("context has no 'clients'")
 	}
-	return email, clients
+	return userID, clients
 }
 
 // GenerateSecret returns a byte slice of length n of cryptographically secure random data
@@ -430,4 +381,17 @@ func decodeState(state string) (string, string, string, error) {
 		return "", "", "", err
 	}
 	return values.Get("csrf"), values.Get("ref"), values.Get("prv"), nil
+}
+
+func createJWT(userID int64) (string, error) {
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwtClaims{
+		UserID: userID,
+		StandardClaims: jwt.StandardClaims{
+			IssuedAt:  time.Now().Unix(),
+			NotBefore: time.Now().Unix(),
+			ExpiresAt: time.Now().Add(jwtDuration).Unix(),
+			// TODO: add JTI / nonce
+		},
+	})
+	return token.SignedString(jwtSecret)
 }
