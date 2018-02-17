@@ -16,7 +16,11 @@ import (
 	"golang.org/x/oauth2"
 )
 
-var sessionDuration = time.Minute * 10
+// TODO: update session age on requests
+// TODO: pass XSRF token
+
+var authDuration = time.Minute * 10
+var loginDuration = time.Minute * 30
 
 type Auth struct {
 	sessionStore sessions.Store
@@ -93,8 +97,7 @@ func (a *Auth) Auth(w http.ResponseWriter, r *http.Request) {
 	referrer := r.Form.Get("referrer")
 
 	session, _ := a.sessionStore.New(r, "auth")
-	session.Options.MaxAge = int(sessionDuration.Seconds())
-	log.Println("Session authenticate MaxAge:", sessionDuration.Seconds())
+	session.Options.MaxAge = int(authDuration.Seconds())
 	// session.Options.Secure = true // TODO: use HTTPS
 	session.Options.HttpOnly = true
 	session.Values["csrf"] = csrf
@@ -151,6 +154,7 @@ func (a *Auth) Token(w http.ResponseWriter, r *http.Request) {
 
 	// Get session
 	session, err := a.sessionStore.New(r, "auth")
+	fmt.Println("Session:", session.Options)
 	if err != nil {
 		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
 		return
@@ -213,13 +217,17 @@ func (a *Auth) Token(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	session.Options.MaxAge = int(loginDuration.Seconds())
+	// session.Options.Secure = true // TODO: use HTTPS
+	session.Options.HttpOnly = true
 	session.Values["user"] = user.Email
-	log.Println("Session login MaxAge:", session.Options.MaxAge)
 	if err := session.Save(r, w); err != nil {
 		log.Println("could not save session:", err)
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
+
+	w.Header().Set("X-CSRF-Token", csrf.Token(r))
 
 	v := struct {
 		User     string
@@ -239,7 +247,8 @@ func (a *Auth) Token(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (a *Auth) Check(w http.ResponseWriter, r *http.Request) {
+// TODO: remove
+func (a *Auth) Refresh(w http.ResponseWriter, r *http.Request) {
 	if a.cors != "" {
 		w.Header().Set("Access-Control-Allow-Origin", a.cors)
 		w.Header().Set("Access-Control-Allow-Methods", "GET")
@@ -254,9 +263,18 @@ func (a *Auth) Check(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, _, err := a.Validate(w, r)
+	_, email, err := a.Validate(w, r)
 	if err != nil {
 		http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
+		return
+	}
+
+	// Send JSON response
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(email); err != nil {
+		log.Println("could not encode response:", err)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
 }
