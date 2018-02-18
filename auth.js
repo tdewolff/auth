@@ -47,7 +47,7 @@ const Auth = {
       return Promise.reject(error)
     })
 
-    if (Auth.getUser()['exp'] * 1000 < new Date().getTime() || Auth.getUser()['nbf'] * 1000 > new Date().getTime()) {
+    if (Auth.isLoggedIn() && (Auth.getUser()['exp'] * 1000 < new Date().getTime() || Auth.getUser()['nbf'] * 1000 > new Date().getTime())) {
       Auth.store.dispatch('logout')
     }
   },
