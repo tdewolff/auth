@@ -21,9 +21,6 @@ const Auth = {
     }, false)
 
     Vue.axios.interceptors.request.use(request => {
-      if (process.env.NODE_ENV === 'development') {
-        console.log('Request: ' + JSON.stringify(request))
-      }
       if (Auth.isLoggedIn()) {
         request.headers.common['authorization'] = Auth.store.getters.jwt
       }
@@ -31,9 +28,6 @@ const Auth = {
     })
 
     Vue.axios.interceptors.response.use(response => {
-      if (process.env.NODE_ENV === 'development') {
-        console.log('Response: ' + JSON.stringify(response))
-      }
       if (response.headers['set-authorization']) {
         Auth.store.dispatch('login', response.headers['set-authorization'])
       }
