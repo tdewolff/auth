@@ -1,10 +1,8 @@
 import Vue from 'vue'
 import jwtDecode from 'jwt-decode'
-import router from './router'
-import config from '../../config'
 
 const Auth = {
-  install (Vue, store) {
+  install (Vue, store, URL) {
     Object.defineProperties(Vue.prototype, {
       $auth: {
         get () {
@@ -15,6 +13,7 @@ const Auth = {
 
     store.registerModule('auth', AuthStore)
     this.store = store
+    this.URL = URL
 
     // Reload Vuex state if localStorage is changed in another tab
     window.addEventListener('storage', () => {
@@ -42,7 +41,6 @@ const Auth = {
     }, error => {
       if (error.response && error.response.status === 401) {
         Auth.store.dispatch('logout')
-        router.push('/?referrer=' + encodeURIComponent(router.history.current.path))
       }
       return Promise.reject(error)
     })
@@ -54,7 +52,7 @@ const Auth = {
   getAuthURLs: function (referrer) {
     return new Promise((resolve, reject) => {
       if (!Auth.isLoggedIn()) {
-        Vue.axios.get(config.URL + '/auth/list?referrer=' + encodeURIComponent(referrer), {withCredentials: true})
+        Vue.axios.get(Auth.URL + '/auth/list?referrer=' + encodeURIComponent(referrer), {withCredentials: true})
         .then(response => {
           resolve(response.data)
         })
@@ -77,7 +75,7 @@ const Auth = {
   login: function (state, code) {
     const timezone = new Intl.DateTimeFormat().resolvedOptions().timeZone
     return new Promise((resolve, reject) => {
-      Vue.axios.get(config.URL + '/auth/token?state=' + encodeURIComponent(state) + '&code=' + encodeURIComponent(code) + '&timezone=' + encodeURIComponent(timezone), {withCredentials: true})
+      Vue.axios.get(Auth.URL + '/auth/token?state=' + encodeURIComponent(state) + '&code=' + encodeURIComponent(code) + '&timezone=' + encodeURIComponent(timezone), {withCredentials: true})
       .then(response => {
         resolve(response.data)
       })
