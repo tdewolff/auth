@@ -14,6 +14,7 @@ var Providers = map[string]ProviderFunc{
 	"google":   Google,
 	"facebook": Facebook,
 	"github":   GitHub,
+	"typetalk": Typetalk,
 }
 
 type UserFunc func(*http.Client) (*User, error)
@@ -118,6 +119,43 @@ func GitHub(clientID, clientSecret, redirectURL string, scopes []string) *Provid
 
 			v := struct {
 				Email string `json:"email"`
+				Name  string `json:"name"`
+			}{}
+
+			if err := json.NewDecoder(resp.Body).Decode(&v); err != nil {
+				return nil, err
+			}
+			return &User{
+				Email:     v.Email,
+				FirstName: v.Name,
+			}, nil
+		},
+	}
+}
+
+// Typetalk handles OAuth2 authentication with Typetalk
+func Typetalk(clientID, clientSecret, redirectURL string, scopes []string) *Provider {
+	return &Provider{
+		"Typetalk",
+		&oauth2.Config{
+			ClientID:     clientID,
+			ClientSecret: clientSecret,
+			RedirectURL:  redirectURL,
+			Endpoint: oauth2.Endpoint{
+				AuthURL:  "https://typetalk.com/oauth2/authorize",
+				TokenURL: "https://typetalk.com/oauth2/access_token",
+			},
+			Scopes: mergeScopes(scopes, []string{"my"}),
+		},
+		func(client *http.Client) (*User, error) {
+			resp, err := client.Get("https://typetalk.com/api/v1/profile")
+			if err != nil {
+				return nil, err
+			}
+			defer resp.Body.Close()
+
+			v := struct {
+				Email string `json:"mailAddress"`
 				Name  string `json:"name"`
 			}{}
 
